@@ -1,0 +1,56 @@
+# Function to check for repeated failed logins
+function Check-FailedLogins {
+    param (
+        [string]$workspaceId,
+        [int]$threshold = 2, # Threshold for considering failed logins as an anomaly
+        [int]$timeSpanMinutes = 15 # Time span in minutes to check for failed logins
+    )
+
+    $endDate = Get-Date
+    $startDate = $endDate.AddMinutes(-$timeSpanMinutes)
+
+    # KQL Query
+    $query = @"
+Syslog
+| where SyslogMessage contains 'Failed password' and TimeGenerated between(datetime('$startDate') .. datetime('$endDate'))
+| summarize CountFailedLogins = count() by Computer, SyslogMessage
+| where CountFailedLogins > $threshold
+"@
+
+    # Execute the query
+    $result = Invoke-AzOperationalInsightsQuery -WorkspaceId $workspaceId -Query $query
+    return $result.Results
+}
+
+# Main script starts here
+
+# Authenticate with Azure using Managed Identity
+Connect-AzAccount -Identity
+
+# Specify your Azure Log Analytics Workspace ID
+$workspaceId = "2241a5d7-e337-4e0b-9153-d7d242aee5e6"
+
+# Check for anomalies
+$anomalies = Check-FailedLogins -workspaceId $workspaceId
+
+# Construct the JSON body for the Logic App
+$jsonBody = @{
+    subject = "Anomaly Detected"
+    message = "Anomalies have been detected. Please review the logs."
+} | ConvertTo-Json
+
+# Logic App HTTP POST URL
+$logicAppUrl = "https://prod-25.canadacentral.logic.azure.com:443/workflows/d1c10cbda8b74e1e9f23ff258cf2bee0/triggers/When_a_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_a_HTTP_request_is_received%2Frun&sv=1.0&sig=AiACb2KMx_k9Zgh9wyJhUZxKJXU9kreIvi1d8o5Hh2E"
+
+# Send data to the Logic App if anomalies are detected
+if ($anomalies.Count -gt 0) {
+    try {
+        Write-Output "Sending data to Logic App..."
+        Invoke-RestMethod -Uri $logicAppUrl -Method Post -ContentType 'application/json' -Body $jsonBody
+        Write-Output "HTTP POST to Logic App successful."
+    } catch {
+        Write-Error "HTTP POST to Logic App failed: $_"
+    }
+} else {
+    Write-Output "No anomalies detected."
+}
